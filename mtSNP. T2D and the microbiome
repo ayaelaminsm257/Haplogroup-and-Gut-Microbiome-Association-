@@ -1,4 +1,4 @@
-library(lme4)   # only used in STEP 7 (random-intercept check); install if missing
+library(lme4)   
  
 # ---------------------------------------------------------
 # SETTINGS (set these before running if you want different values)
