@@ -1,0 +1,147 @@
+library(lme4)   # only used in STEP 7 (random-intercept check); install if missing
+ 
+# ---------------------------------------------------------
+# SETTINGS (set these before running if you want different values)
+# ---------------------------------------------------------
+if (!exists("N_PERM"))             N_PERM             <- 1000   # use 200 for a quick test
+if (!exists("MAF_MIN"))            MAF_MIN            <- 0.05
+if (!exists("MIN_CARRIERS"))       MIN_CARRIERS       <- 15     # people carrying the minor allele
+if (!exists("MIN_CASE_CARRIERS"))  MIN_CASE_CARRIERS  <- 5      # T2D cases carrying the minor allele
+if (!exists("CALL_RATE_MIN"))      CALL_RATE_MIN      <- 0.95
+if (!exists("R2_TAG"))             R2_TAG             <- 0.8    # SNPs above this r2 are grouped
+if (!exists("MIN_CARRIERS_SITE"))  MIN_CARRIERS_SITE  <- 10     # Run B: carriers within a site
+if (!exists("MIN_CASE_CARR_SITE")) MIN_CASE_CARR_SITE <- 3      # Run B: case carriers within a site
+if (!exists("MIN_CASES_SITE"))     MIN_CASES_SITE     <- 15     # Run B: a site needs this many T2D cases
+if (!exists("ADJUST_BMI"))         ADJUST_BMI         <- TRUE   # FALSE = leave BMI out (see note at the end)
+if (!exists("NUC_PCS"))            NUC_PCS            <- c("PC1", "PC2", "PC3")
+set.seed(1)
+# STEP 1: Define T2D (your composite definition)
+# ---------------------------------------------------------
+d <- All_with_haplogroup
+table(d$lab_fasting_confirmed, useNA = "always")      # check the coding is "Yes"/"No"
+summary(d$lab_glucose)
+ 
+d$T2D_composite <- with(d,
+  ifelse(
+    (lab_fasting_confirmed == "Yes" & !is.na(lab_glucose) & lab_glucose > 7) |
+    (lab_fasting_confirmed == "No"  & !is.na(lab_glucose) & lab_glucose > 11.1) |
+    (!is.na(card_diabetes_status) & card_diabetes_status == "Yes") |
+    (!is.na(card_diabetes_treatment) & card_diabetes_treatment == "Yes"),
+    "T2D", "No"))
+d$T2D01 <- ifelse(d$T2D_composite == "T2D", 1, ifelse(d$T2D_composite == "No", 0, NA))
+table(d$T2D_composite, useNA = "always")
+# STEP 2: Build the analysis table (genotype + T2D + covariates)
+# ---------------------------------------------------------
+if (max(geno, na.rm = TRUE) == 2) {      # only needed if geno is still 0/1/2
+  geno[geno == 1] <- NA
+  geno[geno == 2] <- 1
+}
+stopifnot(all(c("general_site", "demographic_age", "anthropometric_bmi", NUC_PCS) %in% colnames(meta_all)))
+ 
+ids <- intersect(rownames(geno), rownames(meta_all))
+dat <- meta_all[ids, c("general_site", "demographic_age", "anthropometric_bmi", NUC_PCS)]
+m   <- match(ids, d$general_sample_id)
+dat$T2D       <- d$T2D01[m]
+dat$hap_group <- substr(d$Haplogroup[m], 1, 2)
+adj <- c("demographic_age", if (ADJUST_BMI) "anthropometric_bmi", NUC_PCS)
+dat <- dat[complete.cases(dat[, c("T2D", "general_site", adj)]), ]
+dat$general_site <- droplevels(factor(dat$general_site))
+geno <- as.matrix(geno[rownames(dat), , drop = FALSE])
+ 
+cat("\nPeople with genotype, T2D status and covariates:", nrow(dat), "\n")
+cat("T2D cases:", sum(dat$T2D == 1), "| controls:", sum(dat$T2D == 0), "\n")
+print(table(site = dat$general_site, T2D = dat$T2D))
+# STEP 3: Filter SNPs and pick tag SNPs (on the T2D analysis sample)
+# ---------------------------------------------------------
+y_all  <- dat$T2D
+qc_all <- snp_qc(geno, y_all, MIN_CARRIERS, MIN_CASE_CARRIERS)
+cat("\n", sum(qc_all$keep), "of", ncol(geno), "SNPs pass the filters\n")
+G_all    <- geno[, qc_all$keep, drop = FALSE]
+tags_all <- choose_tags(G_all)
+cat("Independent tag SNPs (r2 >=", R2_TAG, "):", nrow(tags_all), "\n")
+Gt_all   <- G_all[, tags_all$tag, drop = FALSE]
+tag_info <- tags_all[, c("tag", "n_members", "members")]
+# STEP 4: RUN A - everyone pooled, site as a fixed effect (main analysis)
+# ---------------------------------------------------------
+XA   <- cov_matrix(dat, with_site = TRUE)
+scA  <- scan_logistic(Gt_all, y_all, XA)
+tabA <- data.frame(snp = rownames(scA), scA, row.names = NULL)
+tabA <- merge(tabA, tag_info, by.x = "snp", by.y = "tag", all.x = TRUE)
+tabA$carriers      <- colSums(Gt_all == 1, na.rm = TRUE)[tabA$snp]
+tabA$case_carriers <- colSums(Gt_all == 1 & y_all == 1, na.rm = TRUE)[tabA$snp]
+ 
+strata <- dat$general_site                    # shuffle T2D only within sites
+minpA  <- replicate(N_PERM, min(scan_logistic(Gt_all, y_all[permute_idx(length(y_all), strata)], XA)[, "p"], na.rm = TRUE))
+resA   <- report_scan(tabA, minpA, "RUN A: all sites pooled, site as fixed effect", "mtdna_t2d_runA_pooled")
+ 
+# ---------------------------------------------------------
+# STEP 5: RUN B - each site separately, then combined (meta-analysis)
+# ---------------------------------------------------------
+site_prep <- lapply(sort(unique(as.character(dat$general_site))), function(s) {
+  rows <- which(dat$general_site == s)
+  if (sum(dat$T2D[rows] == 1) < MIN_CASES_SITE) return(list(site = s, rows = rows, snps = character(0)))
+  qc <- snp_qc(Gt_all[rows, , drop = FALSE], dat$T2D[rows], MIN_CARRIERS_SITE, MIN_CASE_CARR_SITE, maf_min = 0)
+  list(site = s, rows = rows, snps = qc$snp[qc$keep],
+       G = Gt_all[rows, qc$snp[qc$keep], drop = FALSE], y = dat$T2D[rows],
+       X = cov_matrix(dat[rows, ], with_site = FALSE))
+})
+for (sp in site_prep)
+  cat("  ", sp$site, ": n =", length(sp$rows), "| cases:", sum(dat$T2D[sp$rows] == 1),
+      "| tag SNPs testable:", length(sp$snps), "\n")
+ 
+scan_sites <- function(shuffle = FALSE) {
+  nm <- colnames(Gt_all)
+  W <- WB <- WB2 <- K <- setNames(numeric(length(nm)), nm)
+  for (sp in site_prep) {
+    if (length(sp$snps) == 0) next
+    y <- sp$y; if (shuffle) y <- y[sample.int(length(y))]
+    r  <- scan_logistic(sp$G, y, sp$X)
+    ok <- !is.na(r[, "se"]) & is.finite(r[, "se"]) & r[, "se"] > 0
+    w  <- ifelse(ok, 1 / r[, "se"]^2, 0); b <- ifelse(ok, r[, "beta"], 0)
+    s  <- rownames(r)
+    W[s] <- W[s] + w; WB[s] <- WB[s] + w * b; WB2[s] <- WB2[s] + w * b^2; K[s] <- K[s] + ok
+  }
+  beta <- WB / W; se <- 1 / sqrt(W)
+  p    <- 2 * pnorm(-abs(beta / se))
+  Q    <- WB2 - WB^2 / W
+  I2   <- pmax(0, (Q - (K - 1)) / Q)
+  p[K < 2] <- NA                                  # need at least 2 sites
+  data.frame(snp = nm, beta = beta, se = se, p = p, k = K, I2 = I2, row.names = NULL)
+}
+ 
+tabB <- merge(scan_sites(), tag_info, by.x = "snp", by.y = "tag", all.x = TRUE)
+tabB$carriers      <- colSums(Gt_all == 1, na.rm = TRUE)[tabB$snp]
+tabB$case_carriers <- colSums(Gt_all == 1 & y_all == 1, na.rm = TRUE)[tabB$snp]
+minpB <- replicate(N_PERM, min(scan_sites(shuffle = TRUE)$p, na.rm = TRUE))
+resB  <- report_scan(tabB, minpB, "RUN B: each site separately, combined across sites", "mtdna_t2d_runB_meta")
+ 
+# ---------------------------------------------------------
+# STEP 6: Checks on the top SNPs (random intercept for site, haplogroup)
+# ---------------------------------------------------------
+# For the strongest SNPs in Run A: does the result hold with site as a random
+# intercept, and after adjusting for haplogroup? (A tag that marks a major
+# branch, such as the L2/L3 split, cannot be separated from haplogroup.)
+top_snps <- head(resA$snp[resA$p < 0.05], 5)
+top_checks <- NULL
+if (length(top_snps) > 0) {
+  top_checks <- do.call(rbind, lapply(top_snps, function(s) {
+    df <- data.frame(T2D = dat$T2D, snp = Gt_all[, s], site = dat$general_site,
+                     hap = factor(dat$hap_group), dat[, adj, drop = FALSE])
+    df[adj] <- lapply(df[adj], function(v) as.numeric(scale(v)))   # helps convergence
+    df <- df[!is.na(df$snp), ]
+    f_fix <- reformulate(c("snp", adj, "site"), response = "T2D")
+    f_ran <- as.formula(paste("T2D ~ snp +", paste(adj, collapse = " + "), "+ (1 | site)"))
+    f_hap <- reformulate(c("snp", adj, "site", "hap"), response = "T2D")
+    grab  <- function(fit) { cf <- summary(fit)$coefficients["snp", ]; c(OR = exp(cf[1]), p = cf[4]) }
+    safe  <- function(expr) tryCatch(expr, error = function(e) c(OR = NA, p = NA))
+    rbind(
+      data.frame(snp = s, model = "site fixed (main)",        t(safe(grab(glm(f_fix, binomial, df))))),
+      data.frame(snp = s, model = "site random intercept",    t(safe(grab(suppressWarnings(glmer(f_ran, df, family = binomial)))))),
+      data.frame(snp = s, model = "adjusted for haplogroup",  t(safe(grab(glm(f_hap, binomial, df))))))
+  }))
+  rownames(top_checks) <- NULL
+  cat("\n===== Top SNP checks (OR per carrier; p) =====\n")
+  print(top_checks, digits = 3)
+}
+ 
+save(resA, resB, tags_all, top_checks, dat, file = "mtdna_t2d_results.RData")
