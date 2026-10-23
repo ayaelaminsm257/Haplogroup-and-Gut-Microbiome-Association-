@@ -1,1 +1,59 @@
-
+library(vegan)
+library(permute)
+ 
+NPERM <- 999
+set.seed(1)
+ 
+run_permanova <- function(counts, meta, label) {
+ 
+  # 1. Line up the people in the counts and the sample info
+  ids    <- intersect(rownames(counts), rownames(meta))
+  counts <- as.matrix(counts[ids, ])
+  meta   <- meta[ids, ]
+  keep   <- rowSums(counts) > 0               # drop anyone with no counts at all
+  counts <- counts[keep, ]
+  meta   <- meta[keep, ]
+  meta$Haplogroup_group <- factor(meta$Haplogroup_group)
+  meta$general_site     <- factor(meta$general_site)
+ 
+  # 2. Turn counts into proportions, then measure how different
+  #    every pair of people is (Bray-Curtis distance)
+  rel  <- counts / rowSums(counts)
+  dist <- vegdist(rel, method = "bray")
+ 
+  # 3. PERMANOVA. Haplogroup labels are shuffled only WITHIN each site,
+  #    so differences between sites cannot create a false result.
+  #    by = "margin" tests each variable after allowing for all the others.
+  perm <- how(nperm = NPERM, blocks = meta$general_site)
+  fit  <- adonis2(dist ~ demographic_age + anthropometric_bmi + antibiotics_collapsed +
+                    general_site + Haplogroup_group,
+                  data = meta, by = "margin", permutations = perm)
+  cat("\n=====", label, "(n =", nrow(meta), ") =====\n")
+  print(fit)
+  cat("(Ignore the general_site p-value: it is not valid when shuffling within site.)\n")
+ 
+ 
+  row <- fit["Haplogroup_group", ]
+  data.frame(level = label,
+             n = nrow(meta),
+             R2 = round(row$R2, 4),               # share of variation explained by haplogroup
+             F = round(row$F, 2),
+             p_haplogroup = row$`Pr(>F)`,
+}
+ 
+res_species <- run_permanova(species_filtered, maaslin_metadata_filtered, "Species")
+res_genus   <- run_permanova(genus_filtered,   maaslin_genus_metadata_filtered, "Genus")
+ 
+results <- rbind(res_species, res_genus)
+cat("\n=== SUMMARY ===\n")
+print(results, row.names = FALSE)
+write.csv(results, "permanova_haplogroup_results.csv", row.names = FALSE)
+ 
+# ---------------------------------------------------------
+# HOW TO READ IT
+# ---------------------------------------------------------
+# p_haplogroup < 0.05  : overall composition differs between haplogroups
+# R2                   : how much of the total variation haplogroup explains
+#                        (values of 0.01 = 1% are typical and small)
+# A non-significant p_haplogroup means no detectable difference in overall
+# composition. It does not prove there is none, because of limited power.
