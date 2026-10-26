@@ -1,0 +1,265 @@
+# ---- SPECIES RUN:----
+taxa_counts <- species_t_all          
+NUC_PCS     <- c("PC1", "PC2", "PC3")
+N_PERM      <- 1000                  
+cat("species table:", dim(taxa_counts), "\n")
+# ---------------------------------------
+
+# SETTINGS
+# ---------------------------------------------------------
+if (!exists("N_PERM"))             N_PERM             <- 200   
+if (!exists("MAF_MIN"))            MAF_MIN            <- 0.05  # minor allele frequency, pooled data
+if (!exists("MIN_CARRIERS"))       MIN_CARRIERS       <- 15    # people carrying the minor allele (analysis sample)
+if (!exists("MIN_CARRIERS_SITE"))  MIN_CARRIERS_SITE  <- 10    # same, within one site (RUN 2)
+if (!exists("CALL_RATE_MIN"))      CALL_RATE_MIN      <- 0.95  # share of people with a genotype
+if (!exists("R2_TAG"))             R2_TAG             <- 0.8   # SNPs above this r2 are grouped
+if (!exists("TAXA_PREV_MIN"))      TAXA_PREV_MIN      <- 0.10  # drop taxa found in under 10% of samples
+if (!exists("NUC_PCS"))            NUC_PCS            <- character(0)
+if (!exists("first_site"))         first_site         <- "Agincourt"
+ 
+set.seed(1)
+ 
+ 
+# ---------------------------------------------------------
+# STEP 1: Line up the data and check the genotype coding
+
+needed <- c("general_site", "demographic_age", "anthropometric_bmi",
+            "antibiotics_collapsed", NUC_PCS)
+stopifnot(all(needed %in% colnames(meta_all)))
+ 
+ids <- Reduce(intersect, list(rownames(geno), rownames(taxa_counts), rownames(meta_all)))
+geno        <- as.matrix(geno[ids, , drop = FALSE])
+taxa_counts <- as.matrix(taxa_counts[ids, , drop = FALSE])
+meta_all    <- meta_all[ids, , drop = FALSE]
+stopifnot(!anyNA(meta_all[, needed]))
+ 
+cat("Samples with genotypes, microbiome and covariates:", length(ids), "\n")
+print(table(meta_all$general_site))
+ 
+cat("\nGenotype values found (look at this!):\n")
+print(table(as.vector(geno), useNA = "ifany"))
+if (max(geno, na.rm = TRUE) == 2) {
+  cat("Values 0/1/2 found. Treating 1 (mixed / heteroplasmic call) as missing\n",
+      "and 2 as the variant allele (coded 1).\n")
+  geno[geno == 1] <- NA
+  geno[geno == 2] <- 1
+}
+ 
+ 
+# ---------------------------------------------------------
+# STEP 2: Helper functions
+
+# Which SNPs are common enough, and well enough called, to test?
+snp_qc <- function(G, min_carriers, maf_min = MAF_MIN) {
+  n1  <- colSums(G == 1, na.rm = TRUE)
+  n0  <- colSums(G == 0, na.rm = TRUE)
+  mac <- pmin(n1, n0)                        # minor allele count
+  data.frame(snp = colnames(G),
+             call_rate = colMeans(!is.na(G)),
+             mac = mac, maf = mac / (n1 + n0),
+             keep = colMeans(!is.na(G)) >= CALL_RATE_MIN & mac >= min_carriers &
+                    mac / (n1 + n0) >= maf_min,
+             row.names = NULL)
+}
+ 
+# Group SNPs that carry (almost) the same information; keep one tag per group
+choose_tags <- function(G, r2 = R2_TAG) {
+  if (ncol(G) == 1)
+    return(data.frame(cluster = 1, tag = colnames(G), n_members = 1, members = colnames(G)))
+  r <- suppressWarnings(cor(G, use = "pairwise.complete.obs"))
+  r[is.na(r)] <- 0
+  cl  <- cutree(hclust(as.dist(1 - r^2), method = "complete"), h = 1 - r2 + 1e-9)
+  p1  <- colMeans(G == 1, na.rm = TRUE)
+  maf <- pmin(p1, 1 - p1)
+  do.call(rbind, lapply(sort(unique(cl)), function(k) {
+    m <- names(cl)[cl == k]
+    data.frame(cluster = k, tag = m[which.max(maf[m])],
+               n_members = length(m), members = paste(m, collapse = ";"))
+  }))
+}
+ 
+# Counts -> log2 relative abundance (the same transform used in the MaAsLin2 runs)
+make_Y <- function(counts) {
+  prop <- counts / rowSums(counts)
+  Y <- apply(prop, 2, function(x) { x[x == 0] <- min(x[x > 0]) / 2; log2(x) })
+  rownames(Y) <- rownames(counts)
+  Y
+}
+ 
+# Covariates for the model (an intercept column is included)
+cov_matrix <- function(meta, with_site = FALSE) {
+  terms <- c("demographic_age", "anthropometric_bmi", "antibiotics_collapsed", NUC_PCS)
+  if (with_site) terms <- c(terms, "general_site")
+  X <- model.matrix(reformulate(terms), data = droplevels(meta))
+  stopifnot(nrow(X) == nrow(meta))
+  X
+}
+ 
+# The scan itself: for every SNP, test it against EVERY taxon at once.
+
+scan_all <- function(G, Y, Xcov) {
+  nS <- ncol(G); nT <- ncol(Y)
+  empty <- matrix(NA_real_, nS, nT, dimnames = list(colnames(G), colnames(Y)))
+  beta <- empty; se <- empty; p <- empty
+  for (j in seq_len(nS)) {
+    ok <- !is.na(G[, j])
+    X  <- cbind(Xcov[ok, , drop = FALSE], snp = G[ok, j])
+    q  <- qr(X)
+    if (q$rank < ncol(X)) next               # SNP cannot be separated from the covariates
+    df <- sum(ok) - q$rank
+    Yo <- Y[ok, , drop = FALSE]
+    bj <- qr.coef(q, Yo)[ncol(X), ]
+    s2 <- colSums(qr.resid(q, Yo)^2) / df
+    v  <- solve(crossprod(X))[ncol(X), ncol(X)]
+    sj <- sqrt(s2 * v)
+    beta[j, ] <- bj
+    se[j, ]   <- sj
+    p[j, ]    <- 2 * pt(-abs(bj / sj), df)
+  }
+  list(beta = beta, se = se, p = p)
+}
+ 
+# Shuffle genotypes between people (whole rows, so SNP linkage is kept),
+# optionally only within groups such as sites
+permute_idx <- function(n, strata = NULL) {
+  if (is.null(strata)) return(sample.int(n))
+  idx <- seq_len(n)
+  for (s in unique(strata)) { w <- which(strata == s); idx[w] <- w[sample.int(length(w))] }
+  idx
+}
+ 
+# Turn the result matrices into one long table
+to_table <- function(lst) {
+  nS <- nrow(lst$p); nT <- ncol(lst$p)
+  tab <- data.frame(snp = rep(rownames(lst$p), times = nT),
+                    taxon = rep(colnames(lst$p), each = nS))
+  for (nm in names(lst)) tab[[nm]] <- as.vector(lst[[nm]])
+  tab
+}
+ 
+# Print a summary, add BH q-values and permutation p-values, save files
+report_scan <- function(tab, minp = NULL, label, prefix) {
+  tab <- tab[!is.na(tab$p), ]
+  tab$q_BH <- p.adjust(tab$p, "BH")
+  tab <- tab[order(tab$p), ]
+  n <- nrow(tab)
+  lambda <- median(qchisq(tab$p, 1, lower.tail = FALSE)) / qchisq(0.5, 1)
+ 
+  # QQ plot: points should follow the red line unless there are real signals
+  png(paste0(prefix, "_qq.png"), width = 600, height = 600)
+  e <- (seq_len(n) - 0.5) / n
+  plot(-log10(e), -log10(tab$p), pch = 16, cex = 0.5, main = label,
+       xlab = "Expected -log10(p)", ylab = "Observed -log10(p)")
+  abline(0, 1, col = "red")
+  dev.off()
+  write.csv(tab, paste0(prefix, "_results.csv"), row.names = FALSE)
+  invisible(tab)
+}
+ 
+ 
+# =========================================================
+# RUN 1: ONE SITE ONLY (Agincourt)
+# =========================================================
+rows1 <- which(meta_all$general_site == first_site)
+G1    <- geno[rows1, , drop = FALSE]
+ 
+qc1 <- snp_qc(G1, MIN_CARRIERS)
+cat("\nRUN 1 (", first_site, ", n = ", length(rows1), "): ", sum(qc1$keep), " of ", ncol(G1),
+    " SNPs pass the filters\n", sep = "")
+G1 <- G1[, qc1$keep, drop = FALSE]
+ 
+tags1 <- choose_tags(G1)
+cat("Independent tag SNPs (r2 >= ", R2_TAG, "): ", nrow(tags1), "\n", sep = "")
+G1t <- G1[, tags1$tag, drop = FALSE]
+ 
+keep_t1 <- colMeans(taxa_counts[rows1, ] > 0) >= TAXA_PREV_MIN
+Y1 <- make_Y(taxa_counts[rows1, keep_t1, drop = FALSE])
+X1 <- cov_matrix(meta_all[rows1, ], with_site = FALSE)     # no site term: site is constant here
+cat("Taxa tested:", ncol(Y1), "| total tests:", nrow(tags1) * ncol(Y1), "\n")
+ 
+sc1  <- scan_all(G1t, Y1, X1)
+tab1 <- to_table(sc1)
+tab1 <- merge(tab1, tags1[, c("tag", "n_members", "members")], by.x = "snp", by.y = "tag", all.x = TRUE)
+tab1$carriers <- colSums(G1t == 1, na.rm = TRUE)[tab1$snp]
+ 
+minp1 <- replicate(N_PERM, min(scan_all(G1t[permute_idx(nrow(G1t)), , drop = FALSE], Y1, X1)$p, na.rm = TRUE))
+res1  <- report_scan(tab1, minp1, paste("RUN 1:", first_site, "only"), "species_mtdna_run1_agincourt")
+ 
+ 
+# =========================================================
+# RUN 2: ALL SITES, SEPARATELY, THEN COMBINED (meta-analysis)
+
+# Each site is analysed on its own, so site can never confound the result.
+# The per-site estimates are then combined, giving more weight to the more
+# precise ones. 'I2' shows how much the sites disagree (0 = agree fully).
+ 
+qc_all <- snp_qc(geno, MIN_CARRIERS, MAF_MIN)
+cat("\nRUN 2: ", sum(qc_all$keep), " of ", ncol(geno), " SNPs pass the pooled filters\n", sep = "")
+G_all  <- geno[, qc_all$keep, drop = FALSE]
+tags_all <- choose_tags(G_all)
+cat("Independent tag SNPs:", nrow(tags_all), "\n")
+Gt_all <- G_all[, tags_all$tag, drop = FALSE]
+ 
+# Prepare each site once (so the shuffles are quick)
+site_prep <- lapply(sort(unique(meta_all$general_site)), function(s) {
+  rows <- which(meta_all$general_site == s)
+  qc   <- snp_qc(Gt_all[rows, , drop = FALSE], MIN_CARRIERS_SITE, maf_min = 0)
+  keep_t <- colMeans(taxa_counts[rows, ] > 0) >= TAXA_PREV_MIN
+  list(site = s, rows = rows, snps = qc$snp[qc$keep],
+       Y = make_Y(taxa_counts[rows, keep_t, drop = FALSE]),
+       X = cov_matrix(meta_all[rows, ], with_site = FALSE))
+})
+for (sp in site_prep)
+  cat("  ", sp$site, ": n =", length(sp$rows), "| tag SNPs testable:", length(sp$snps),
+      "| taxa:", ncol(sp$Y), "\n")
+ 
+scan_sites <- function(Gt, shuffle = FALSE) {
+  blank <- function() matrix(0, ncol(Gt), ncol(taxa_counts),
+                             dimnames = list(colnames(Gt), colnames(taxa_counts)))
+  W <- blank(); WB <- blank(); WB2 <- blank(); K <- blank()
+  for (sp in site_prep) {
+    if (length(sp$snps) == 0) next
+    Gs <- Gt[sp$rows, sp$snps, drop = FALSE]
+    if (shuffle) Gs <- Gs[sample.int(nrow(Gs)), , drop = FALSE]
+    sc <- scan_all(Gs, sp$Y, sp$X)
+    w  <- 1 / sc$se^2
+    ok <- !is.na(w) & is.finite(w)
+    rr <- rownames(sc$p); cc <- colnames(sc$p)
+    W[rr, cc]   <- W[rr, cc]   + ifelse(ok, w, 0)
+    WB[rr, cc]  <- WB[rr, cc]  + ifelse(ok, w * sc$beta, 0)
+    WB2[rr, cc] <- WB2[rr, cc] + ifelse(ok, w * sc$beta^2, 0)
+    K[rr, cc]   <- K[rr, cc]   + ok
+  }
+  beta <- WB / W
+  se   <- 1 / sqrt(W)
+  p    <- 2 * pnorm(-abs(beta / se))
+  Q    <- WB2 - WB^2 / W                         # how much the sites disagree
+  I2   <- pmax(0, (Q - (K - 1)) / Q)
+  p[K < 2] <- NA                                 # need at least 2 sites
+  list(beta = beta, se = se, p = p, k = K, I2 = I2)
+}
+ 
+sc2  <- scan_sites(Gt_all)
+tab2 <- to_table(sc2)
+tab2 <- merge(tab2, tags_all[, c("tag", "n_members", "members")], by.x = "snp", by.y = "tag", all.x = TRUE)
+minp2 <- replicate(N_PERM, min(scan_sites(Gt_all, shuffle = TRUE)$p, na.rm = TRUE))
+res2  <- report_scan(tab2, minp2, "RUN 2: all sites, combined across sites", "species_mtdna_run2_allsites_meta")
+ 
+ 
+# =========================================================
+# RUN 3: ALL SITES POOLED, SITE AS A COVARIATE (check on RUN 2)
+
+keep_t3 <- colMeans(taxa_counts > 0) >= TAXA_PREV_MIN
+Y3 <- make_Y(taxa_counts[, keep_t3, drop = FALSE])
+X3 <- cov_matrix(meta_all, with_site = TRUE)
+ 
+sc3  <- scan_all(Gt_all, Y3, X3)
+tab3 <- to_table(sc3)
+tab3 <- merge(tab3, tags_all[, c("tag", "n_members", "members")], by.x = "snp", by.y = "tag", all.x = TRUE)
+tab3$carriers <- colSums(Gt_all == 1, na.rm = TRUE)[tab3$snp]
+ 
+strata <- meta_all$general_site                    # shuffle only within sites
+minp3 <- replicate(N_PERM, min(scan_all(Gt_all[permute_idx(nrow(Gt_all), strata), , drop = FALSE], Y3, X3)$p, na.rm = TRUE))
+res3  <- report_scan(tab3, minp3, "RUN 3: all sites pooled, site as covariate", "species_mtdna_run3_pooled")
+ 
+save(res1, res2, res3, tags1, tags_all, file = "species_mtdna_association_results.RData")
