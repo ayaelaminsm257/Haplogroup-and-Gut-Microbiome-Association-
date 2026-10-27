@@ -48,12 +48,3 @@ results <- rbind(res_species, res_genus)
 cat("\n=== SUMMARY ===\n")
 print(results, row.names = FALSE)
 write.csv(results, "permanova_haplogroup_results.csv", row.names = FALSE)
- 
-# ---------------------------------------------------------
-# HOW TO READ IT
-# ---------------------------------------------------------
-# p_haplogroup < 0.05  : overall composition differs between haplogroups
-# R2                   : how much of the total variation haplogroup explains
-#                        (values of 0.01 = 1% are typical and small)
-# A non-significant p_haplogroup means no detectable difference in overall
-# composition. It does not prove there is none, because of limited power.
