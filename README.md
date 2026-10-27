@@ -76,7 +76,6 @@ then the remaining scripts in any order.
 - **Effect sizes** are reported with 95% confidence intervals. Power is described through detectable effect
   sizes, not observed power.
 - Reporting is at **species and genus** level only.
-- HIV-positive participants were not excluded (a sensitivity analysis is planned).
 
 ## Requirements
 - R (4.x) with `vegan`, `permute`, `Maaslin2`, `lme4`
@@ -88,9 +87,3 @@ The input files are not distributed here:
 - Imputed mtDNA genotypes (PLINK format) and nuclear array data
 - Species and genus count tables (mOTUs)
 - Clinical metadata (age, BMI, antibiotic use, site, glucose, diabetes status and treatment)
-
-Access to AWI-Gen 2 data is through the AWI-Gen project. Replace the file paths at the top of each script
-with your own.
-
-## Citation and contact
-<!-- Add: thesis title, your name, supervisor, year, and a licence if you want one. -->
