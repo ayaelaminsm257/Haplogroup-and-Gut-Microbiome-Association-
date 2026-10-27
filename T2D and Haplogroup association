@@ -1,0 +1,102 @@
+library(Maaslin2)
+
+# ---------------------------------------------------------
+# 1. T2D definition: recorded status + glucose + medication
+
+d <- All_with_haplogroup
+
+status_yes  <- with(d, !is.na(card_diabetes_status)    & card_diabetes_status == "Yes")
+med_yes     <- with(d, !is.na(card_diabetes_treatment) & card_diabetes_treatment == "Yes")
+glucose_yes <- with(d, (lab_fasting_confirmed == "Yes" & !is.na(lab_glucose) & lab_glucose > 7) |
+                       (lab_fasting_confirmed == "No"  & !is.na(lab_glucose) & lab_glucose > 11.1))
+glucose_yes[is.na(glucose_yes)] <- FALSE
+
+d$T2D <- ifelse(status_yes | glucose_yes | med_yes, "T2D", "No")
+
+# Treatment groups
+d$T2D_group <- ifelse(d$T2D == "No", "Control",
+                ifelse(med_yes, "T2D_treated", "T2D_untreated"))
+d$on_treatment <- ifelse(med_yes, "Yes", "No")
+
+# ---------------------------------------------------------
+# 2. Attach to the analysis metadata and COUNT who is in it
+
+meta <- maaslin_metadata_filtered
+m    <- match(rownames(meta), d$general_sample_id)
+meta$T2D          <- d$T2D[m]
+meta$T2D_group    <- d$T2D_group[m]
+meta$on_treatment <- d$on_treatment[m]
+meta$general_site <- factor(meta$general_site)
+ref_site <- names(which.max(table(meta$general_site)))
+
+keep <- !is.na(meta$T2D)
+cat("\nPeople in analysis:", sum(keep), "\n")
+print(table(meta$T2D[keep]))                 # use THESE numbers in your Methods
+print(table(meta$T2D_group[keep]))
+print(table(site = meta$general_site[keep], T2D = meta$T2D[keep]))
+
+# ---------------------------------------------------------
+# 3. MaAsLin2 helper (site fixed; BH recomputed on the term of interest)
+
+run_term <- function(extra_fixed, refs, term, out) {
+  Maaslin2(input_data = species_filtered[keep, ], input_metadata = meta[keep, ],
+           output = out,
+           fixed_effects = c(extra_fixed, "Haplogroup_group", "demographic_age",
+                             "anthropometric_bmi", "antibiotics_collapsed", "general_site"),
+           reference = c(refs, "Haplogroup_group,L0", "antibiotics_collapsed,Never",
+                         paste0("general_site,", ref_site)),
+           normalization = "TSS", transform = "LOG", analysis_method = "LM")
+  res <- read.table(file.path(out, "all_results.tsv"), header = TRUE, sep = "\t")
+  r   <- res[res$metadata == term, ]
+  r$q_BH <- ave(r$pval, r$value, FUN = function(p) p.adjust(p, "BH"))  # BH within each contrast
+  r <- r[order(r$pval), ]
+  for (v in unique(r$value)) {
+    s <- r[r$value == v, ]
+    cat("\n", out, "|", term, v, "| taxa:", nrow(s), "| p<0.05:", sum(s$pval < 0.05),
+        "| q<0.05:", sum(s$q_BH < 0.05), "\n")
+    print(head(s[, c("feature", "coef", "stderr", "pval", "q_BH", "N", "N.not.0")], 10),
+          row.names = FALSE, digits = 3)
+  }
+  write.csv(r, paste0(out, "_", term, ".csv"), row.names = FALSE)
+  invisible(r)
+}
+
+# (main) T2D vs controls
+res_t2d <- run_term("T2D", "T2D,No", "T2D", "maaslin_T2D_species_sitefixed")
+
+# (a) adjusted for diabetes treatment
+res_adj <- run_term(c("T2D", "on_treatment"), c("T2D,No", "on_treatment,No"),
+                    "T2D", "maaslin_T2D_adj_treatment_sitefixed")
+
+# (b) treated and untreated cases, each against controls
+res_grp <- run_term("T2D_group", "T2D_group,Control", "T2D_group",
+                    "maaslin_T2D_group_sitefixed")
+
+# ---------------------------------------------------------
+# 4. Haplogroup vs T2D: logistic regression (site fixed)
+
+lg <- meta[keep, ]
+lg$T2D01 <- as.numeric(lg$T2D == "T2D")
+lg$Haplogroup_group <- relevel(factor(lg$Haplogroup_group), ref = "L0")
+lg <- lg[complete.cases(lg[, c("T2D01", "Haplogroup_group", "demographic_age",
+                               "anthropometric_bmi", "general_site")]), ]
+
+fit0 <- glm(T2D01 ~ demographic_age + anthropometric_bmi + general_site,
+            family = binomial, data = lg)
+fit  <- glm(T2D01 ~ Haplogroup_group + demographic_age + anthropometric_bmi + general_site,
+            family = binomial, data = lg)
+
+cf <- summary(fit)$coefficients
+ci <- exp(confint.default(fit))
+hap_rows <- grep("^Haplogroup_group", rownames(cf))
+tab <- data.frame(term = rownames(cf)[hap_rows], OR = exp(cf[hap_rows, 1]),
+                  low = ci[hap_rows, 1], high = ci[hap_rows, 2], p = cf[hap_rows, 4])
+print(tab, row.names = FALSE, digits = 3)
+cat("\nOverall haplogroup effect (likelihood-ratio test): p =",
+    signif(anova(fit0, fit, test = "Chisq")[2, "Pr(>Chi)"], 3), "\n")
+
+# Sensitivity: site as a random intercept
+library(lme4)
+fit_re <- glmer(T2D01 ~ Haplogroup_group + scale(demographic_age) + scale(anthropometric_bmi) +
+                  (1 | general_site), family = binomial, data = lg)
+print(round(exp(fixef(fit_re)[grep("Haplogroup", names(fixef(fit_re)))]), 2))
