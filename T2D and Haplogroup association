@@ -94,9 +94,3 @@ tab <- data.frame(term = rownames(cf)[hap_rows], OR = exp(cf[hap_rows, 1]),
 print(tab, row.names = FALSE, digits = 3)
 cat("\nOverall haplogroup effect (likelihood-ratio test): p =",
     signif(anova(fit0, fit, test = "Chisq")[2, "Pr(>Chi)"], 3), "\n")
-
-# Sensitivity: site as a random intercept
-library(lme4)
-fit_re <- glmer(T2D01 ~ Haplogroup_group + scale(demographic_age) + scale(anthropometric_bmi) +
-                  (1 | general_site), family = binomial, data = lg)
-print(round(exp(fixef(fit_re)[grep("Haplogroup", names(fixef(fit_re)))]), 2))
