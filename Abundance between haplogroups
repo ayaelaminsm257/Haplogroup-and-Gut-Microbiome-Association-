@@ -1,1 +1,53 @@
+library(Maaslin2)
 
+REFERENCE <- "L0"     
+
+run_maaslin <- function(counts, meta, label) {
+
+  # 1. Line up people. MaAsLin2 drops anyone with an NA in a model variable itself.
+  ids    <- intersect(rownames(counts), rownames(meta))
+  counts <- counts[ids, ]
+  meta   <- meta[ids, ]
+  meta$Haplogroup_group <- relevel(factor(meta$Haplogroup_group), ref = REFERENCE)
+  meta$general_site     <- factor(meta$general_site)
+
+  outdir <- paste0("maaslin_", tolower(label), "_site_fixed_ref", REFERENCE)
+
+  # 2. Fit one linear model per species/genus.
+  fit <- Maaslin2(
+    input_data      = counts,
+    input_metadata  = meta,
+    output          = outdir,
+    fixed_effects   = c("Haplogroup_group", "demographic_age", "anthropometric_bmi",
+                        "antibiotics_collapsed", "general_site"),
+    reference       = c(paste0("Haplogroup_group,", REFERENCE)),
+    normalization   = "TSS",     # turn counts into proportions
+    transform       = "LOG",     # log-transform the proportions
+    analysis_method = "LM",
+    min_prevalence  = 0,         # already filtered to 10%
+    min_abundance   = 0,
+    plot_heatmap    = FALSE,
+    plot_scatter    = FALSE
+  )
+
+  # 3. Keep ONLY the haplogroup rows, then correct (BH) across those tests only.
+  #    (MaAsLin2's own qval is pooled over age, BMI, site etc. and is too lenient.)
+  res <- read.table(file.path(outdir, "all_results.tsv"), header = TRUE, sep = "\t")
+  hap <- res[res$metadata == "Haplogroup_group", ]
+  hap$qval_haplogroup <- p.adjust(hap$pval, method = "BH")
+  hap <- hap[order(hap$pval), ]
+
+  cat("\n=====", label, ": haplogroup vs", REFERENCE, "(site fixed) =====\n")
+  cat("Taxa tested:", length(unique(hap$feature)), "| tests:", nrow(hap), "\n")
+  cat("Nominal p < 0.05:", sum(hap$pval < 0.05),
+      "| BH q < 0.05:", sum(hap$qval_haplogroup < 0.05),
+      "| BH q < 0.25:", sum(hap$qval_haplogroup < 0.25), "\n")
+  print(head(hap[, c("feature", "value", "coef", "stderr", "N", "N.not.0",
+                     "pval", "qval_haplogroup")], 15), row.names = FALSE)
+
+  write.csv(hap, paste0(outdir, "_haplogroup_results.csv"), row.names = FALSE)
+  invisible(hap)
+}
+
+species_res <- run_maaslin(species_filtered, maaslin_metadata_filtered,       "Species")
+genus_res   <- run_maaslin(genus_filtered,   maaslin_genus_metadata_filtered, "Genus")
