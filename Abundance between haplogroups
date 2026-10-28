@@ -11,7 +11,7 @@ run_maaslin <- function(counts, meta, label) {
   meta$Haplogroup_group <- relevel(factor(meta$Haplogroup_group), ref = REFERENCE)
   meta$general_site     <- factor(meta$general_site)
 
-  outdir <- paste0("maaslin_", tolower(label), "_site_fixed_ref", REFERENCE)
+  outdir <- paste0("maaslin_", tolower(label), "_site_fixed_ref", REFERENCE)     # name for output location
 
   # 2. Fit one linear model per species/genus.
   fit <- Maaslin2(
@@ -30,8 +30,7 @@ run_maaslin <- function(counts, meta, label) {
     plot_scatter    = FALSE
   )
 
-  # 3. Keep ONLY the haplogroup rows, then correct (BH) across those tests only.
-  #    (MaAsLin2's own qval is pooled over age, BMI, site etc. and is too lenient.)
+  # 3. Keep ONLY the haplogroup rows, then correct (BH) across those tests only. (MaAsLin2's own qval is pooled over age, BMI, site etc. and is too lenient.)
   res <- read.table(file.path(outdir, "all_results.tsv"), header = TRUE, sep = "\t")
   hap <- res[res$metadata == "Haplogroup_group", ]
   hap$qval_haplogroup <- p.adjust(hap$pval, method = "BH")
