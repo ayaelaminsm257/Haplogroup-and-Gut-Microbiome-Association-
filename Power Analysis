@@ -1,0 +1,116 @@
+# Effect sizes, 95% CIs, power and sample size needed
+# Haplogroup vs L0, species level
+# Agincourt only  vs  all sites (site as a FIXED effect)
+# =============================================================
+FILE_AGINCOURT <- "maaslin_agincourt_only/all_results.tsv"
+FILE_ALL       <- "maaslin_species_site_fixed_refL0/all_results.tsv"
+
+TOP_N              <- 10
+effect_of_interest <- 1      # log2 units (1 = 2-fold, 0.58 = 1.5-fold)
+POWER_TARGET       <- 0.80
+ALPHA              <- 0.05
+FOLDS              <- c(1.1, 1.2, 1.3, 1.5, 2)   # fold-changes for the sample-size table
+
+# parameters in each model:
+#  Agincourt: intercept + 3 haplogroup + age + BMI + 2 antibiotic = 8
+#  All sites (site fixed): the same 8 + 5 site dummies          = 13
+N_PARAMS_AG  <- 8
+N_PARAMS_ALL <- 13
+
+# -------------------------------------------------------------
+# Part 1: CIs, power and smallest detectable effect
+
+haplogroup_power <- function(file, n_params, label) {
+  res <- read.table(file, header = TRUE, sep = "\t")
+  hap <- res[res$metadata == "Haplogroup_group", ]       # ALL haplogroup tests, not just significant ones
+
+  n_tests      <- nrow(hap)
+  alpha_strict <- ALPHA / n_tests                         # Bonferroni over every test run
+  cat("\n=====", label, "=====\n")
+  cat("Haplogroup tests:", n_tests, "| Bonferroni threshold:", signif(alpha_strict, 3), "\n")
+  cat("Haplogroup p < 0.05:", sum(hap$pval < 0.05),
+      "(expected by chance:", round(0.05 * n_tests), ")\n")
+
+  # ---- Top results with 95% CIs ----
+  top <- head(hap[order(hap$pval), ], TOP_N)
+  top$species  <- gsub("\\.", " ", gsub("^X[0-9]+\\.|^NA\\.", "", top$feature))
+  top$df       <- top$N - n_params
+  tcrit        <- qt(0.975, top$df)
+  top$ci_low   <- top$coef - tcrit * top$stderr
+  top$ci_high  <- top$coef + tcrit * top$stderr
+  print(top[, c("species", "value", "coef", "ci_low", "ci_high", "pval")],
+        row.names = FALSE, digits = 3)
+
+  # ---- Power at the effect size I care about ----
+  hap$df <- hap$N - n_params
+  power_at <- function(delta, se, df, alpha) {
+    crit <- qt(1 - alpha / 2, df); ncp <- delta / se
+    1 - pt(crit, df, ncp) + pt(-crit, df, ncp)
+  }
+  hap$power_raw    <- power_at(effect_of_interest, hap$stderr, hap$df, ALPHA)
+  hap$power_strict <- power_at(effect_of_interest, hap$stderr, hap$df, alpha_strict)
+
+  # smallest effect detectable with POWER_TARGET power (log2 units)
+  mde <- function(se, df, alpha)
+    (qt(1 - alpha / 2, df) + qt(POWER_TARGET, df)) * se
+  hap$mde_raw    <- mde(hap$stderr, hap$df, ALPHA)
+  hap$mde_strict <- mde(hap$stderr, hap$df, alpha_strict)
+
+  cat("\nMedian standard error (log2):", round(median(hap$stderr), 3), "\n")
+  cat("Smallest effect detectable with", POWER_TARGET * 100, "% power, median across taxa:\n")
+  cat("  at p < 0.05            :", round(median(hap$mde_raw), 2), "log2 (",
+      round(2^median(hap$mde_raw), 2), "-fold)\n")
+  cat("  at Bonferroni threshold:", round(median(hap$mde_strict), 2), "log2 (",
+      round(2^median(hap$mde_strict), 2), "-fold)\n")
+  cat("Share of taxa with >=", POWER_TARGET * 100, "% power to detect a", effect_of_interest,
+      "log2 effect:\n")
+  cat("  at p < 0.05            :", round(mean(hap$power_raw >= POWER_TARGET), 3), "\n")
+  cat("  at Bonferroni threshold:", round(mean(hap$power_strict >= POWER_TARGET), 3), "\n")
+
+  write.csv(hap, paste0("haplogroup_power_", gsub("[ ()]", "_", label), ".csv"), row.names = FALSE)
+  invisible(hap)
+}
+
+# -------------------------------------------------------------
+# Part 2: sample size needed to detect a given fold-change (assumes the SE shrinks with 1/sqrt(n); uses the median taxon)
+
+sample_size_needed <- function(hap, label) {
+  se_now  <- median(hap$stderr)
+  n_now   <- median(hap$N)
+  n_tests <- nrow(hap)
+
+  need_n <- function(fold, alpha) {
+    delta   <- log2(fold)                                   # effect in log2 units
+    z       <- qnorm(1 - alpha / 2) + qnorm(POWER_TARGET)   # needed effect / SE
+    se_need <- delta / z                                    # SE you must reach
+    ceiling(n_now * (se_now / se_need)^2)
+  }
+
+  out <- data.frame(
+    fold_change  = FOLDS,
+    n_p05        = sapply(FOLDS, need_n, alpha = ALPHA),
+    n_bonferroni = sapply(FOLDS, need_n, alpha = ALPHA / n_tests)
+  )
+  out$extra_p05        <- pmax(0, out$n_p05 - n_now)
+  out$extra_bonferroni <- pmax(0, out$n_bonferroni - n_now)
+
+  cat("\n=== Sample size needed:", label, "===\n")
+  cat("Current: median N =", n_now, "| median SE =", round(se_now, 3), "\n")
+  print(out, row.names = FALSE)
+  write.csv(out, paste0("sample_size_needed_", gsub("[ ()]", "_", label), ".csv"), row.names = FALSE)
+  invisible(out)
+}
+
+# -------------------------------------------------------------
+# Run both
+
+if (!file.exists(FILE_ALL)) {
+  print(list.files(pattern = "^maaslin", include.dirs = TRUE))
+  stop("Set FILE_ALL to the all_results.tsv of your site-fixed all-sites run.")
+}
+
+pow_ag  <- haplogroup_power(FILE_AGINCOURT, N_PARAMS_AG,  "Agincourt only")
+pow_all <- haplogroup_power(FILE_ALL,       N_PARAMS_ALL, "All sites (site fixed)")
+
+ss_ag   <- sample_size_needed(pow_ag,  "Agincourt only")
+ss_all  <- sample_size_needed(pow_all, "All sites (site fixed)")
