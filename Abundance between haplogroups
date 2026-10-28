@@ -19,7 +19,7 @@ run_maaslin <- function(counts, meta, label) {
     input_metadata  = meta,
     output          = outdir,
     fixed_effects   = c("Haplogroup_group", "demographic_age", "anthropometric_bmi",
-                        "antibiotics_collapsed", "general_site"),
+                        "antibiotics_collapsed", "general_site"),                      # Done without PC
     reference       = c(paste0("Haplogroup_group,", REFERENCE)),
     normalization   = "TSS",     # turn counts into proportions
     transform       = "LOG",     # log-transform the proportions
