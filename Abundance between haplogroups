@@ -50,3 +50,55 @@ run_maaslin <- function(counts, meta, label) {
 
 species_res <- run_maaslin(species_filtered, maaslin_metadata_filtered,       "Species")
 genus_res   <- run_maaslin(genus_filtered,   maaslin_genus_metadata_filtered, "Genus")
+
+# One Site only analysis (Agincourt-Only)
+
+library(dplyr)
+
+# Filter, merge, and prepare everything in one chain
+merged_L <- All_with_haplogroup %>%
+  filter(grepl("^L", Haplogroup), general_site == "Agincourt") %>%
+  mutate(Haplogroup_group = substr(Haplogroup, 1, 2)) %>%
+  filter(
+    !is.na(Haplogroup_group),
+    !is.na(demographic_age),
+    !is.na(anthropometric_bmi),
+    !is.na(antibiotics_collapsed),
+    !is.na(general_site)
+  ) %>%
+  merge(species_t_all, by = "general_sample_id")
+
+# Split into metadata and species data, keeping sample IDs as rownames throughout
+species_names <- rownames(lst.motus$species)
+species_cols_present <- intersect(colnames(merged_L), species_names)
+
+species_abundance_L <- merged_L[, species_cols_present]
+rownames(species_abundance_L) <- merged_L$general_sample_id
+
+maaslin_L_metadata <- merged_L[, c("Haplogroup_group", "demographic_age",
+                                     "anthropometric_bmi", "antibiotics_collapsed")]
+rownames(maaslin_L_metadata) <- merged_L$general_sample_id
+
+# Confirm alignment before running
+all(rownames(species_abundance_L) == rownames(maaslin_L_metadata))
+
+# Run MaAsLin2
+fit_results <- Maaslin2(
+  input_data = species_abundance_L,
+  input_metadata = maaslin_L_metadata,
+  output = "maaslin_L_agincourt_output",
+  fixed_effects = c("Haplogroup_group", "demographic_age", "anthropometric_bmi", "antibiotics_collapsed"),
+  reference = c("Haplogroup_group,L0", "antibiotics_collapsed,Never"),
+  normalization = "TSS",
+  transform = "LOG",
+  analysis_method = "LM"
+)
+# Read in the results
+all_results <- read.table("maaslin_L_agincourt_output/all_results.tsv",
+                          header = TRUE, sep = "\t")
+# Focus on haplogroup effects
+haplogroup_results <- all_results[all_results$metadata == "Haplogroup_group", ]
+# Order by q-value (FDR corrected p-value)
+haplogroup_results <- haplogroup_results[order(haplogroup_results$qval), ]
+head(haplogroup_results, 20)
+sum(haplogroup_results$qval < 0.05)
