@@ -8,7 +8,7 @@ composition and with type 2 diabetes (T2D) in African cohorts.
 
 | Script | Question it answers | Method |
 |---|---|---|
-| **mtDNA quality control** | Which mtDNA variants and people are usable, and how do we correct for ancestry? | PLINK filtering and allele alignment, tag-SNP selection, ancestry principal components |
+| **mtDNA quality control** |  |  |
 | **Haplogroup significance to overall microbiome** | Does haplogroup explain variation in overall microbiome composition? | PERMANOVA (`vegan::adonis2`) on Bray–Curtis distances, shuffling within site |
 | **Abundance between haplogroups** | For each species or genus, does abundance differ between L1, L2 or L3 and L0? | MaAsLin2 (site as a fixed effect), with and without ancestry PCs, plus an Agincourt-only run and a power analysis |
 | **mtSNP and Species abundance** | Is any individual mtDNA SNP associated with the abundance of a species or genus? | Linear regression per tag SNP × taxon, pooled and per-site with meta-analysis, permutation check |
