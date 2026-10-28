@@ -1,8 +1,8 @@
 library(vegan)
 library(permute)
  
-NPERM <- 999
-set.seed(1)
+NPERM <- 999             # number of permutations
+set.seed(1)              # shuffles the same way if run multiple times (same p value)
  
 run_permanova <- function(counts, meta, label) {
  
@@ -13,21 +13,19 @@ run_permanova <- function(counts, meta, label) {
   keep   <- rowSums(counts) > 0               # drop anyone with no counts at all
   counts <- counts[keep, ]
   meta   <- meta[keep, ]
-  meta$Haplogroup_group <- factor(meta$Haplogroup_group)
+  meta$Haplogroup_group <- factor(meta$Haplogroup_group)      # treats these as categories not number or text
   meta$general_site     <- factor(meta$general_site)
  
-  # 2. Turn counts into proportions, then measure how different
-  #    every pair of people is (Bray-Curtis distance)
+  # 2. Turn counts into proportions, then measure how different every pair of people is (Bray-Curtis distance)
   rel  <- counts / rowSums(counts)
   dist <- vegdist(rel, method = "bray")
  
-  # 3. PERMANOVA. Haplogroup labels are shuffled only WITHIN each site,
-  #    so differences between sites cannot create a false result.
-  #    by = "margin" tests each variable after allowing for all the others.
+  # 3. PERMANOVA. Haplogroup labels are shuffled only WITHIN each site so differences between sites cannot create a false result.
+  
   perm <- how(nperm = NPERM, blocks = meta$general_site)
   fit  <- adonis2(dist ~ demographic_age + anthropometric_bmi + antibiotics_collapsed +
                     general_site + Haplogroup_group,
-                  data = meta, by = "margin", permutations = perm)
+                  data = meta, by = "margin", permutations = perm)              #    by = "margin" tests each variable after allowing for all the others.
   cat("\n=====", label, "(n =", nrow(meta), ") =====\n")
   print(fit)
   cat("(Ignore the general_site p-value: it is not valid when shuffling within site.)\n")
@@ -35,13 +33,13 @@ run_permanova <- function(counts, meta, label) {
  
   row <- fit["Haplogroup_group", ]
   data.frame(level = label,
-             n = nrow(meta),
+             n = nrow(meta),                      # number of samples
              R2 = round(row$R2, 4),               # share of variation explained by haplogroup
-             F = round(row$F, 2),
-             p_haplogroup = row$`Pr(>F)`,
+             F = round(row$F, 2),                 # pseudo_F
+             p_haplogroup = row$`Pr(>F)`,         # proportion of permutations with a pseudo-F at least as large as the observed value
 }
  
-res_species <- run_permanova(species_filtered, maaslin_metadata_filtered, "Species")
+res_species <- run_permanova(species_filtered, maaslin_metadata_filtered, "Species")     # ("count", "meta", "label")
 res_genus   <- run_permanova(genus_filtered,   maaslin_genus_metadata_filtered, "Genus")
  
 results <- rbind(res_species, res_genus)
