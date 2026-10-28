@@ -1,3 +1,28 @@
+# Bash code
+module load PLINK2
+
+# 1. Keep only the people in the analysis
+plink2 --bfile awigen --keep keep_snp.txt --make-bed --out awigen_snp      # keep_snp.txt previously made from samples with complete metadata
+
+# 2. LD-prune the nuclear variants (window 200 SNPs, step 50, r2 < 0.1)
+plink2 --bfile awigen_snp --indep-pairwise 200 50 0.1 --out pruned_snp
+
+# 3. Principal components on the pruned set (10 PCs)
+plink2 --bfile awigen_snp --extract pruned_snp.prune.in --pca 10 --out ancestry_snp
+
+# R code
+
+ancestry.eigenvec <- read.table("ancestry_snp.eigenvec", header = TRUE, comment.char = "")
+# columns: #FID/FID, IID, PC1, PC2, ... PC10
+pcs <- ancestry.eigenvec[, c("IID", "PC1", "PC2", "PC3")]
+
+# link genotype IDs (e.g. "AB0011") to microbiome IDs (e.g. "AG001") using the same ID mapping you used for `geno`, then:
+meta_all$PC1 <- pcs$PC1[match(meta_all$general_study_id, pcs$IID)]
+meta_all$PC2 <- pcs$PC2[match(meta_all$general_study_id, pcs$IID)]
+meta_all$PC3 <- pcs$PC3[match(meta_all$general_study_id, pcs$IID)]
+
+# Start Analysis
+
 library(Maaslin2)
  
 REFERENCE <- "L0"                   
