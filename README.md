@@ -24,11 +24,7 @@ then the remaining scripts in any order.
 - Aligns the imputed mtDNA genotypes to the revised Cambridge Reference Sequence (rCRS), so that the
   reference allele is coded 0 and the other allele 1 (mtDNA is haploid, so genotypes are 0/1, and mixed
   calls are set to missing).
-- Filters SNPs by call rate (at least 95%), minor allele frequency (at least 5%) and a minimum number of
-  minor-allele carriers.
-- Groups SNPs in strong linkage disequilibrium (r² ≥ 0.8) and keeps one tag SNP per group.
-- Computes ancestry principal components from the LD-pruned nuclear array (PLINK2), with PC1–PC3 used as
-  covariates.
+
 
 ### Haplogroup significance to overall microbiome
 - Keeps haplogroups L0–L3, converts counts to relative abundance and measures dissimilarity between
