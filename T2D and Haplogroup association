@@ -81,9 +81,9 @@ lg$Haplogroup_group <- relevel(factor(lg$Haplogroup_group), ref = "L0")
 lg <- lg[complete.cases(lg[, c("T2D01", "Haplogroup_group", "demographic_age",
                                "anthropometric_bmi", "general_site")]), ]
 
-fit0 <- glm(T2D01 ~ demographic_age + anthropometric_bmi + general_site,
-            family = binomial, data = lg)
-fit  <- glm(T2D01 ~ Haplogroup_group + demographic_age + anthropometric_bmi + general_site,
+fit0 <- glm(T2D01 ~ demographic_age + anthropometric_bmi + general_site,                     # no haplogroup
+            family = binomial, data = lg)                            
+fit  <- glm(T2D01 ~ Haplogroup_group + demographic_age + anthropometric_bmi + general_site,  # haplogroup included
             family = binomial, data = lg)
 
 cf <- summary(fit)$coefficients
@@ -93,4 +93,4 @@ tab <- data.frame(term = rownames(cf)[hap_rows], OR = exp(cf[hap_rows, 1]),
                   low = ci[hap_rows, 1], high = ci[hap_rows, 2], p = cf[hap_rows, 4])
 print(tab, row.names = FALSE, digits = 3)
 cat("\nOverall haplogroup effect (likelihood-ratio test): p =",
-    signif(anova(fit0, fit, test = "Chisq")[2, "Pr(>Chi)"], 3), "\n")
+    signif(anova(fit0, fit, test = "Chisq")[2, "Pr(>Chi)"], 3), "\n")  # asks whether adding haplogroup improves the model more than chance would
