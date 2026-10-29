@@ -11,7 +11,15 @@ glucose_yes <- with(d, (lab_fasting_confirmed == "Yes" & !is.na(lab_glucose) & l
                        (lab_fasting_confirmed == "No"  & !is.na(lab_glucose) & lab_glucose > 11.1))
 glucose_yes[is.na(glucose_yes)] <- FALSE
 
-d$T2D <- ifelse(status_yes | glucose_yes | med_yes, "T2D", "No")
+# Count how many of the three criteria each person meets
+d$n_criteria <- status_yes + glucose_yes + med_yes     # 0, 1, 2 or 3
+table(d$n_criteria)
+
+# T2D = at least 2 criteria; controls = none; exactly 1 = unclear, left out
+d$T2D <- ifelse(d$n_criteria >= 2, "T2D",
+         ifelse(d$n_criteria == 0, "No", NA))
+
+table(d$T2D, useNA = "always")
 
 # Treatment groups
 d$T2D_group <- ifelse(d$T2D == "No", "Control",
