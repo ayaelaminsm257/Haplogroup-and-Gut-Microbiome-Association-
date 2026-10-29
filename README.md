@@ -10,7 +10,9 @@ composition and with type 2 diabetes (T2D) in African cohorts.
 |---|---|---|
 | **mtDNA quality control** |  |  |
 | **Haplogroup significance to overall microbiome** | Does haplogroup explain variation in overall microbiome composition? | PERMANOVA (`vegan::adonis2`) on Bray–Curtis distances, shuffling within site |
-| **Abundance between haplogroups** | For each species or genus, does abundance differ between L1, L2 or L3 and L0? | MaAsLin2 (site as a fixed effect), with and without ancestry PCs, plus an Agincourt-only run and a power analysis |
+| **Abundance between haplogroups** | For each species or genus, does abundance differ between L1, L2 or L3 and L0? | MaAsLin2 (site as a fixed effect), with and without ancestry PCs, plus an Agincourt-only run |
+| **Power Analysis** | Given that we found no significant contribution of haplogroup to species abundance/genus abundance, is the reason due to no existing associations or limited power? |      |
+| **PCA** | Does including PCA as a covariate in my analysis change anything |  |
 | **mtSNP and Species abundance** | Is any individual mtDNA SNP associated with the abundance of a species or genus? | Linear regression per tag SNP × taxon, pooled and per-site with meta-analysis, permutation check |
 | **T2D and Haplogroup association** | Is T2D associated with the microbiome, and with haplogroup? | Composite T2D definition, MaAsLin2 microbiome vs T2D (plus treatment analyses), logistic regression of T2D on haplogroup |
 | **mtSNP and T2D** | Is any individual mtDNA SNP associated with T2D? | Logistic regression per tag SNP, pooled and per-site with meta-analysis, permutation check |
