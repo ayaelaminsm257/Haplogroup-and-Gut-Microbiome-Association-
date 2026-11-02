@@ -1,0 +1,274 @@
+# =============================================================================
+# Freedman-Lane permutation on ALL SNPs individually, then grouped into clusters
+# Gives per-test permutation p (p_perm), family-wise max-T p (p_maxT) and BH q
+# Run for species and for genus
+# =============================================================================
+N_PERM <- 1000                      # use 200 first to check the timing
+set.seed(1)
+
+# ---------------------------------------------------------
+# 1. Functions
+# ---------------------------------------------------------
+make_Z <- function(Z_df) {                                                  # Build covariate design matrix
+  Z_df[] <- lapply(Z_df, function(v) if (is.character(v)) factor(v) else v) # Convert character variables to factors (R doesnt accept characters)
+  model.matrix(~ ., data = Z_df)                                            # Create model matrix with dummy variables and intercept
+}
+
+make_Y <- function(counts) {                                               # Convert counts to log2 relative abundance
+  prop <- counts / rowSums(counts)
+  Y <- apply(prop, 2, function(x) { x[x == 0] <- min(x[x > 0]) / 2; log2(x) }) # Replace zeros with half minimum non-zero abundance
+  rownames(Y) <- rownames(counts)        # Log2(x) Reduce skewness and make abundance values more comparable
+  Y
+}
+
+fl_full <- function(G, Y, Z, site, n_perm = N_PERM, verbose = TRUE) {  # Run Freedman-Lane on all SNP × taxon pairs
+  stopifnot(nrow(G) == nrow(Y), nrow(Y) == nrow(Z), length(site) == nrow(Y))
+  n <- nrow(Y)                                                     # Number of individuals
+  G <- apply(G, 2, function(g) { g[is.na(g)] <- mean(g, na.rm = TRUE); g })  # Impute missing genotypes with SNP mean
+
+  qz <- qr(Z); Q <- qr.Q(qz)[, seq_len(qz$rank), drop = FALSE] # QR decomposition of covariate matrix 
+  resid_Z <- function(M) M - Q %*% crossprod(Q, M) # Residualize any matrix against covariates
+  df <- n - qz$rank - 1    # Residual degrees of freedom
+
+  Gr <- resid_Z(G); gg <- colSums(Gr^2)  # SNPs after removing covariate effects
+  ok <- gg > 1e-8; Gr <- Gr[, ok, drop = FALSE]; gg <- gg[ok]  # Remove SNPs explained completely by covariates
+  R  <- resid_Z(Y)   # Reduced-model residuals (unexplained abundance) 
+
+  tstat <- function(Rm) {   # Compute beta, SE and t-statistics
+    E   <- resid_Z(Rm)         # Residualize permuted abundance matrix (Y*)
+    B   <- crossprod(Gr, Rm) / gg         # SNP effect size estimate (beta)
+    sse <- matrix(colSums(E^2), nrow = length(gg), ncol = ncol(E), byrow = TRUE) - B^2 * gg
+    se  <- sqrt(pmax(sse, 1e-12) / df / gg) # Standard error of beta
+    list(beta = B, se = se, t = B / se)  # t-statistic for SNP effect
+  }
+
+  obs <- tstat(Y); obs_abs <- abs(obs$t) # Observed statistics from real data (tobs)
+  count <- matrix(0, nrow(obs_abs), ncol(obs_abs)) # Per-test permutation counters
+  maxT  <- numeric(n_perm)   # Maximum t-statistic from each permutation
+
+  for (b in seq_len(n_perm)) {   # Repeat permutations
+    idx <- seq_len(n)
+    for (s in levels(site)) { w <- which(site == s); idx[w] <- w[sample.int(length(w))] } # Permute within site only & Shuffle individuals within site
+    tt <- abs(tstat(R[idx, , drop = FALSE])$t)   # Calculate t-statistics from permuted residuals (Y∗=Y^+R∗)
+    count   <- count + (tt >= obs_abs)          # per-test counter
+    maxT[b] <- max(tt)                          # family-wise null (Largest t-statistic across all tests)
+    if (verbose && b %% 100 == 0) cat("shuffle", b, "of", n_perm, "\n")
+  }
+# Build results table
+  out <- data.frame(snp   = rep(colnames(Gr), times = ncol(Y)),
+                    taxon = rep(colnames(Y),  each  = ncol(Gr)),
+                    beta  = as.vector(obs$beta), se = as.vector(obs$se), t = as.vector(obs$t),
+                    n_extreme = as.vector(count))
+  out$p_param <- 2 * pt(-abs(out$t), df)   # Standard regression p-value
+  out$p_perm  <- (out$n_extreme + 1) / (n_perm + 1)  # Per-test Freedman-Lane p-value
+  out$p_maxT  <- (vapply(abs(out$t), function(x) sum(maxT >= x), numeric(1)) + 1) / (n_perm + 1)  How often did ANY SNP-taxon association in the entire scan produce a t-statistic this large?
+  out <- out[order(out$p_param), ]
+  attr(out, "maxT") <- maxT
+  out
+}
+
+# ---------------------------------------------------------
+# 2. All SNPs passing QC (no tagging) and the cluster map
+# ---------------------------------------------------------
+stopifnot(exists("geno"), exists("tags_all"), exists("meta_all"))
+call_rate <- colMeans(!is.na(geno))
+n1  <- colSums(geno == 1, na.rm = TRUE); n0 <- colSums(geno == 0, na.rm = TRUE)
+mac <- pmin(n1, n0); maf <- mac / (n1 + n0)
+G_all <- geno[, call_rate >= 0.95 & mac >= 15 & maf >= 0.05, drop = FALSE]
+cat("SNPs passing QC:", ncol(G_all), "| people:", nrow(G_all),
+    "| clusters:", nrow(tags_all), "\n")                # expect ~138, ~1,419, 46
+
+members <- strsplit(tags_all$members, ";")
+snp2tag <- setNames(rep(tags_all$tag, lengths(members)), unlist(members))
+nmem    <- setNames(tags_all$n_members, tags_all$tag)
+
+# ---------------------------------------------------------
+# 3. One function that runs a taxonomic level
+# ---------------------------------------------------------
+run_level <- function(count_table, label) {
+  cnt <- as.matrix(count_table)
+  cnt <- cnt[intersect(rownames(cnt), rownames(meta_all)), , drop = FALSE]
+  cnt <- cnt[rowSums(cnt) > 0, , drop = FALSE]
+  Y   <- make_Y(cnt[, colMeans(cnt > 0) >= 0.10, drop = FALSE])   # 10% prevalence filter
+
+  ids  <- Reduce(intersect, list(rownames(G_all), rownames(Y), rownames(meta_all)))
+  Z_df <- meta_all[ids, c("demographic_age", "anthropometric_bmi", "antibiotics_collapsed",
+                          "PC1", "PC2", "PC3", "general_site")]
+  ok   <- complete.cases(Z_df); ids <- ids[ok]; Z_df <- Z_df[ok, ]
+  cat("\n=====", label, "| people:", length(ids), "| SNPs:", ncol(G_all),
+      "| taxa:", ncol(Y), "| tests:", ncol(G_all) * ncol(Y), "=====\n")
+
+  res <- fl_full(as.matrix(G_all[ids, ]), as.matrix(Y[ids, ]), make_Z(Z_df),
+                 factor(Z_df$general_site))
+  res$cluster      <- snp2tag[res$snp]
+  res$cluster_size <- nmem[res$cluster]
+  res$q_BH_snp     <- p.adjust(res$p_param, "BH")                 # over every SNP x taxon test
+
+  best <- res[order(res$p_param), ]
+  best <- best[!duplicated(paste(best$cluster, best$taxon)), ]    # best SNP per cluster x taxon
+  best$q_BH_cluster <- p.adjust(best$p_param, "BH")
+  best <- best[order(best$p_param), ]
+
+  cat("SNPs with no cluster:", sum(is.na(res$cluster)), "(should be 0)\n")
+  cat("All-SNP tests:", nrow(res), "| cluster-level tests:", nrow(best), "\n")
+  cat("p < 0.05:", sum(res$p_param < 0.05), "(expected:", round(0.05 * nrow(res)), ")\n")
+  cat("Smallest p:", signif(min(res$p_param), 3),
+      "| smallest BH q (all SNPs):", signif(min(res$q_BH_snp), 3),
+      "| (clusters):", signif(min(best$q_BH_cluster), 3),
+      "| smallest max-T p:", signif(min(res$p_maxT), 3), "\n\n")
+  print(head(best[, c("cluster", "snp", "cluster_size", "taxon", "beta", "se",
+                      "p_param", "p_perm", "p_maxT", "q_BH_cluster")], 15),
+        row.names = FALSE, digits = 3)
+
+  write.csv(res,  paste0(tolower(label), "_mtdna_FL_allSNPs.csv"),  row.names = FALSE)
+  write.csv(best, paste0(tolower(label), "_mtdna_FL_clusters.csv"), row.names = FALSE)
+  invisible(list(all = res, best = best))
+}
+
+# ---------------------------------------------------------
+# 4. Run both levels
+# ---------------------------------------------------------
+out_species <- run_level(species_t_all, "Species")
+out_genus   <- run_level(genus_t_all,   "Genus")
+
+# =============================================================================
+# Freedman-Lane PER-TEST permutation (no max-T), all SNPs, grouped afterwards
+# p_perm = (1 + shuffles with |t*| >= |t_obs|) / (n_perm + 1)
+#        = how often THIS exact SNP-taxon pair gives a t this large under the null
+# =============================================================================
+N_PERM     <- 1000          
+N_PERM_TOP <- 20000         # extra shuffles for the top hits only
+N_TOP      <- 20
+set.seed(1)
+
+# ---------------------------------------------------------
+# 1. Functions
+
+make_Z <- function(Z_df) {
+  Z_df[] <- lapply(Z_df, function(v) if (is.character(v)) factor(v) else v)
+  model.matrix(~ ., data = Z_df)
+}
+
+make_Y <- function(counts) {
+  prop <- counts / rowSums(counts)
+  Y <- apply(prop, 2, function(x) { x[x == 0] <- min(x[x > 0]) / 2; log2(x) })
+  rownames(Y) <- rownames(counts)
+  Y
+}
+
+fl_pertest <- function(G, Y, Z, site, n_perm = N_PERM, verbose = TRUE) {
+  stopifnot(nrow(G) == nrow(Y), nrow(Y) == nrow(Z), length(site) == nrow(Y))
+  n <- nrow(Y)
+  G <- apply(G, 2, function(g) { g[is.na(g)] <- mean(g, na.rm = TRUE); g })
+
+  qz <- qr(Z); Q <- qr.Q(qz)[, seq_len(qz$rank), drop = FALSE]
+  resid_Z <- function(M) M - Q %*% crossprod(Q, M)
+  df <- n - qz$rank - 1
+
+  Gr <- resid_Z(G); gg <- colSums(Gr^2)
+  ok <- gg > 1e-8; Gr <- Gr[, ok, drop = FALSE]; gg <- gg[ok]
+  R  <- resid_Z(Y)
+
+  tstat <- function(Rm) {
+    E   <- resid_Z(Rm)
+    B   <- crossprod(Gr, Rm) / gg
+    sse <- matrix(colSums(E^2), nrow = length(gg), ncol = ncol(E), byrow = TRUE) - B^2 * gg
+    se  <- sqrt(pmax(sse, 1e-12) / df / gg)
+    list(beta = B, se = se, t = B / se)
+  }
+
+  obs     <- tstat(Y)
+  obs_abs <- abs(obs$t)
+  count   <- matrix(0, nrow(obs_abs), ncol(obs_abs))      # shuffles at least as extreme, per test
+
+  for (b in seq_len(n_perm)) {
+    idx <- seq_len(n)
+    for (s in levels(site)) { w <- which(site == s); idx[w] <- w[sample.int(length(w))] }
+    count <- count + (abs(tstat(R[idx, , drop = FALSE])$t) >= obs_abs)
+    if (verbose && b %% 100 == 0) cat("shuffle", b, "of", n_perm, "\n")
+  }
+
+  out <- data.frame(snp   = rep(colnames(Gr), times = ncol(Y)),
+                    taxon = rep(colnames(Y),  each  = ncol(Gr)),
+                    beta  = as.vector(obs$beta), se = as.vector(obs$se), t = as.vector(obs$t),
+                    n_extreme = as.vector(count))
+  out$p_param <- 2 * pt(-abs(out$t), df)                  # ordinary t-test p
+  out$p_perm  <- (out$n_extreme + 1) / (n_perm + 1)       # per-test permutation p
+  out[order(out$p_param), ]
+}
+
+# ---------------------------------------------------------
+# 2. All SNPs passing QC (no tagging) and the cluster map
+# ---------------------------------------------------------
+stopifnot(exists("geno"), exists("tags_all"), exists("meta_all"))
+call_rate <- colMeans(!is.na(geno))
+n1  <- colSums(geno == 1, na.rm = TRUE); n0 <- colSums(geno == 0, na.rm = TRUE)
+mac <- pmin(n1, n0); maf <- mac / (n1 + n0)
+G_all <- geno[, call_rate >= 0.95 & mac >= 15 & maf >= 0.05, drop = FALSE]
+cat("SNPs passing QC:", ncol(G_all), "| people:", nrow(G_all),
+    "| clusters:", nrow(tags_all), "\n")                  # expect ~138, ~1,419, 46
+
+members <- strsplit(tags_all$members, ";")
+snp2tag <- setNames(rep(tags_all$tag, lengths(members)), unlist(members))
+nmem    <- setNames(tags_all$n_members, tags_all$tag)
+
+# ---------------------------------------------------------
+# 3. One function that runs a taxonomic level
+# ---------------------------------------------------------
+run_level <- function(count_table, label) {
+  cnt <- as.matrix(count_table)
+  cnt <- cnt[intersect(rownames(cnt), rownames(meta_all)), , drop = FALSE]
+  cnt <- cnt[rowSums(cnt) > 0, , drop = FALSE]
+  Y   <- make_Y(cnt[, colMeans(cnt > 0) >= 0.10, drop = FALSE])   # 10% prevalence filter
+
+  ids  <- Reduce(intersect, list(rownames(G_all), rownames(Y), rownames(meta_all)))
+  Z_df <- meta_all[ids, c("demographic_age", "anthropometric_bmi", "antibiotics_collapsed",
+                          "PC1", "PC2", "PC3", "general_site")]
+  ok   <- complete.cases(Z_df); ids <- ids[ok]; Z_df <- Z_df[ok, ]
+  G    <- as.matrix(G_all[ids, , drop = FALSE])
+  Yk   <- as.matrix(Y[ids, , drop = FALSE])
+  site <- factor(Z_df$general_site)
+  Z    <- make_Z(Z_df)
+  cat("\n=====", label, "| people:", length(ids), "| SNPs:", ncol(G),
+      "| taxa:", ncol(Yk), "| tests:", ncol(G) * ncol(Yk), "=====\n")
+
+  # per-test permutation on every SNP x taxon pair
+  res <- fl_pertest(G, Yk, Z, site, n_perm = N_PERM)
+  res$cluster      <- snp2tag[res$snp]
+  res$cluster_size <- nmem[res$cluster]
+
+  # group afterwards: best SNP per cluster x taxon, BH over the cluster-level tests
+  best <- res[order(res$p_param), ]
+  best <- best[!duplicated(paste(best$cluster, best$taxon)), ]
+  best$q_BH_cluster <- p.adjust(best$p_param, "BH")
+  best <- best[order(best$p_param), ]
+
+  cat("SNPs with no cluster:", sum(is.na(res$cluster)), "(should be 0)\n")
+  cat("All-SNP tests:", nrow(res), "| cluster-level tests:", nrow(best), "\n")
+  cat("p < 0.05:", sum(best$p_param < 0.05), "(expected:", round(0.05 * nrow(best)), ")\n")
+  cat("Smallest p:", signif(min(best$p_param), 3),
+      "| smallest BH q (clusters):", signif(min(best$q_BH_cluster), 3), "\n\n")
+  print(head(best[, c("cluster", "snp", "cluster_size", "taxon", "beta", "se",
+                      "p_param", "p_perm", "q_BH_cluster")], 15), row.names = FALSE, digits = 3)
+
+  # many more shuffles for the top hits only
+  top <- head(best, N_TOP)
+  top_hi <- do.call(rbind, lapply(seq_len(nrow(top)), function(i) {
+    r <- fl_pertest(G[, top$snp[i], drop = FALSE], Yk[, top$taxon[i], drop = FALSE],
+                    Z, site, n_perm = N_PERM_TOP, verbose = FALSE)
+    data.frame(cluster = top$cluster[i], r[, c("snp", "taxon", "beta", "p_param", "p_perm")])
+  }))
+  cat("\nTop", N_TOP, "with", N_PERM_TOP, "shuffles:\n")
+  print(top_hi, row.names = FALSE, digits = 3)
+
+  write.csv(res,    paste0(tolower(label), "_mtdna_pertest_allSNPs.csv"),   row.names = FALSE)
+  write.csv(best,   paste0(tolower(label), "_mtdna_pertest_clusters.csv"),  row.names = FALSE)
+  write.csv(top_hi, paste0(tolower(label), "_mtdna_pertest_top_hi.csv"),    row.names = FALSE)
+  invisible(list(all = res, best = best, top_hi = top_hi))
+}
+
+# ---------------------------------------------------------
+# 4. Run both levels
+# ---------------------------------------------------------
+pt_species <- run_level(species_t_all, "Species")
+pt_genus   <- run_level(genus_t_all,   "Genus")
