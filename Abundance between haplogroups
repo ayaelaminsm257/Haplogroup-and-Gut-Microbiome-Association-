@@ -102,3 +102,87 @@ haplogroup_results <- all_results[all_results$metadata == "Haplogroup_group", ]
 haplogroup_results <- haplogroup_results[order(haplogroup_results$qval), ]
 head(haplogroup_results, 20)
 sum(haplogroup_results$qval < 0.05)
+
+# =============================================================================
+# Freedman-Lane permutation check for the TOP 10 haplogroup-abundance hits
+# (species, site as fixed effect; each contrast L1/L2/L3 vs L0)
+# Needs: species_filtered, maaslin_metadata_filtered,
+#        maaslin_species_site_fixed_refL0/all_results.tsv
+# =============================================================================
+N_PERM <- 20000          
+TOP_N  <- 10
+set.seed(1)
+
+# ---- 1. Top hits from the MaAsLin2 results ----
+res <- read.table("maaslin_species_site_fixed_refL0/all_results.tsv", header = TRUE, sep = "\t")
+hap <- res[res$metadata == "Haplogroup_group", ]
+hap$q_BH <- ave(hap$pval, hap$value, FUN = function(p) p.adjust(p, "BH"))   # BH within each contrast
+top <- head(hap[order(hap$pval), ], TOP_N)
+
+# ---- 2. Analysis sample and design (same covariates and references as MaAsLin2) ----
+meta <- maaslin_metadata_filtered
+ids  <- intersect(rownames(species_filtered), rownames(meta))
+vars <- c("Haplogroup_group", "demographic_age", "anthropometric_bmi",
+          "antibiotics_collapsed", "general_site")
+ids  <- ids[complete.cases(meta[ids, vars])]
+meta <- meta[ids, ]
+counts <- as.matrix(species_filtered[ids, ])
+keep <- rowSums(counts) > 0; meta <- meta[keep, ]; counts <- counts[keep, ]
+
+meta$Haplogroup_group    <- relevel(factor(meta$Haplogroup_group), "L0")
+meta$antibiotics_collapsed <- relevel(factor(meta$antibiotics_collapsed), "Never")
+meta$general_site        <- factor(meta$general_site)
+site <- meta$general_site
+cat("People:", nrow(meta), "\n")
+
+X_base <- model.matrix(~ demographic_age + anthropometric_bmi + antibiotics_collapsed +
+                         general_site, data = meta)                 # covariates + intercept
+D <- model.matrix(~ Haplogroup_group, data = meta)[, -1, drop = FALSE]   # L1, L2, L3 dummies
+
+# ---- 3. Outcome: TSS + log2 with half-minimum zero replacement (as MaAsLin2 LOG) ----
+prop <- counts / rowSums(counts)
+taxa_names <- make.names(colnames(prop))                            # MaAsLin2 rewrites names
+get_y <- function(feature) {
+  j <- match(feature, taxa_names); stopifnot(!is.na(j))
+  x <- prop[, j]; x[x == 0] <- min(x[x > 0]) / 2
+  log2(x)
+}
+
+# ---- 4. Freedman-Lane for one taxon and one haplogroup contrast ----
+fl_contrast <- function(y, k, n_perm = N_PERM) {
+  Zk <- cbind(X_base, D[, setdiff(colnames(D), k), drop = FALSE])   # other two haplogroups = covariates
+  g  <- D[, k]
+  qz <- qr(Zk); Q <- qr.Q(qz)[, seq_len(qz$rank), drop = FALSE]
+  resid_Z <- function(v) v - Q %*% crossprod(Q, v)
+  df <- length(y) - qz$rank - 1
+  gr <- as.vector(resid_Z(g)); gg <- sum(gr^2)
+  R  <- as.vector(resid_Z(y))                                       # reduced-model residuals
+
+  tfun <- function(r) {
+    E <- as.vector(resid_Z(r)); B <- sum(gr * r) / gg
+    se <- sqrt((sum(E^2) - B^2 * gg) / df / gg)
+    c(B, se, B / se)
+  }
+  obs <- tfun(y); cnt <- 0
+  for (b in seq_len(n_perm)) {
+    idx <- seq_along(y)
+    for (s in levels(site)) { w <- which(site == s); idx[w] <- w[sample.int(length(w))] }
+    cnt <- cnt + (abs(tfun(R[idx])[3]) >= abs(obs[3]))
+  }
+  c(beta = obs[1], se = obs[2], t = obs[3],
+    p_param = 2 * pt(-abs(obs[3]), df), p_perm = (cnt + 1) / (n_perm + 1))
+}
+
+# ---- 5. Run the top hits ----
+out <- do.call(rbind, lapply(seq_len(nrow(top)), function(i) {
+  k <- paste0("Haplogroup_group", top$value[i])                    # e.g. Haplogroup_groupL3
+  r <- fl_contrast(get_y(top$feature[i]), k)
+  data.frame(species   = gsub("\\.", " ", gsub("^X[0-9]+\\.|^NA\\.", "", top$feature[i])),
+             contrast  = paste(top$value[i], "vs L0"),
+             maaslin_coef = top$coef[i], maaslin_p = top$pval[i], maaslin_q = top$q_BH[i],
+             FL_beta = r["beta.D"], FL_p_param = r["p_param"], FL_p_perm = r["p_perm"],
+             row.names = NULL)
+}))
+names(out) <- sub("\\..*$", "", names(out))
+print(out, row.names = FALSE, digits = 3)
+write.csv(out, "haplogroup_top10_FL_check.csv", row.names = FALSE)
