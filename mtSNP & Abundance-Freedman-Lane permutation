@@ -3,7 +3,7 @@
 # Gives per-test permutation p (p_perm), family-wise max-T p (p_maxT) and BH q
 # Run for species and for genus
 # =============================================================================
-N_PERM <- 1000                      # use 200 first to check the timing
+N_PERM <- 1000                     
 set.seed(1)
 
 # ---------------------------------------------------------
