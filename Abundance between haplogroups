@@ -1,6 +1,6 @@
 library(Maaslin2)
 
-REFERENCE <- "L0"     
+REFERENCE <- "L1"     
 
 run_maaslin <- function(counts, meta, label) {
 
@@ -88,7 +88,7 @@ fit_results <- Maaslin2(
   input_metadata = maaslin_L_metadata,
   output = "maaslin_L_agincourt_output",
   fixed_effects = c("Haplogroup_group", "demographic_age", "anthropometric_bmi", "antibiotics_collapsed"),
-  reference = c("Haplogroup_group,L0", "antibiotics_collapsed,Never"),
+  reference = c("Haplogroup_group,L1", "antibiotics_collapsed,Never"),
   normalization = "TSS",
   transform = "LOG",
   analysis_method = "LM"
@@ -102,6 +102,67 @@ haplogroup_results <- all_results[all_results$metadata == "Haplogroup_group", ]
 haplogroup_results <- haplogroup_results[order(haplogroup_results$qval), ]
 head(haplogroup_results, 20)
 sum(haplogroup_results$qval < 0.05)
+
+# One site only analysis (Agincourt only) - GENUS
+
+library(dplyr)
+library(Maaslin2)
+
+merged_G <- All_with_haplogroup %>%
+  filter(grepl("^L", Haplogroup), general_site == "Agincourt") %>%
+  mutate(Haplogroup_group = substr(Haplogroup, 1, 2)) %>%
+  filter(
+    !is.na(Haplogroup_group),
+    !is.na(demographic_age),
+    !is.na(anthropometric_bmi),
+    !is.na(antibiotics_collapsed),
+    !is.na(general_site)
+  ) %>%
+  merge(genus_t_all, by = "general_sample_id")
+
+# Split into metadata and genus data, keeping sample IDs as rownames
+genus_names <- rownames(lst.motus$genus)
+genus_cols_present <- intersect(colnames(merged_G), genus_names)
+cat("Genera found in the table:", length(genus_cols_present), "\n")   # should be > 0
+
+genus_abundance_G <- merged_G[, genus_cols_present]
+rownames(genus_abundance_G) <- merged_G$general_sample_id
+
+maaslin_G_metadata <- merged_G[, c("Haplogroup_group", "demographic_age",
+                                   "anthropometric_bmi", "antibiotics_collapsed")]
+rownames(maaslin_G_metadata) <- merged_G$general_sample_id
+
+# Confirm alignment before running
+all(rownames(genus_abundance_G) == rownames(maaslin_G_metadata))
+table(maaslin_G_metadata$Haplogroup_group)
+
+# Run MaAsLin2
+fit_results_G <- Maaslin2(
+  input_data = genus_abundance_G,
+  input_metadata = maaslin_G_metadata,
+  output = "maaslin_G_agincourt_output",
+  fixed_effects = c("Haplogroup_group", "demographic_age", "anthropometric_bmi", "antibiotics_collapsed"),
+  reference = c("Haplogroup_group,L1", "antibiotics_collapsed,Never"),
+  normalization = "TSS",
+  transform = "LOG",
+  analysis_method = "LM"
+)
+
+# Read in the results
+all_results_G <- read.table("maaslin_G_agincourt_output/all_results.tsv",
+                            header = TRUE, sep = "\t")
+
+# Focus on haplogroup effects
+haplogroup_results_G <- all_results_G[all_results_G$metadata == "Haplogroup_group", ]
+
+# MaAsLin2's qval is corrected over all model terms; recompute BH over the haplogroup rows only
+haplogroup_results_G$q_BH_haplogroup <- p.adjust(haplogroup_results_G$pval, "BH")
+haplogroup_results_G <- haplogroup_results_G[order(haplogroup_results_G$pval), ]
+
+head(haplogroup_results_G, 20)
+cat("Tests:", nrow(haplogroup_results_G),
+    "| q (MaAsLin2) < 0.05:", sum(haplogroup_results_G$qval < 0.05),
+    "| q (haplogroup-only BH) < 0.05:", sum(haplogroup_results_G$q_BH_haplogroup < 0.05), "\n")
 
 # =============================================================================
 # Freedman-Lane permutation check for the TOP 10 haplogroup-abundance hits
