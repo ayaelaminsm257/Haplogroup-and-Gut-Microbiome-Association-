@@ -184,8 +184,42 @@ tab1$carriers <- colSums(G1t == 1, na.rm = TRUE)[tab1$snp]
  
 minp1 <- replicate(N_PERM, min(scan_all(G1t[permute_idx(nrow(G1t)), , drop = FALSE], Y1, X1)$p, na.rm = TRUE))
 res1  <- report_scan(tab1, minp1, paste("RUN 1:", first_site, "only"), "species_mtdna_run1_agincourt")
- 
- 
+
+-----------------------------------------
+# Confirmation of a Anaerotruncus
+ --------------------------------------
+snp <- "MT:8251_G_A"
+tx  <- "Anaerotruncus sp. CAG:390 [ref_mOTU_v3_07591]"
+stopifnot(tx %in% colnames(Y), snp %in% colnames(geno))
+
+# ---- build the table ----
+ids <- Reduce(intersect, list(rownames(Y), rownames(geno), rownames(meta_all)))
+d <- data.frame(meta_all[ids, c("general_site", "demographic_age", "anthropometric_bmi",
+                                "antibiotics_collapsed", "PC1", "PC2", "PC3")],
+                snp = geno[ids, snp], y = Y[ids, tx])
+rownames(d) <- ids
+d$hap <- substr(All_with_haplogroup$Haplogroup[match(ids, All_with_haplogroup$general_sample_id)], 1, 2)
+d <- d[!is.na(d$snp), ]
+d$detected <- d$y > min(d$y) + 1e-9            # the zero-replacement floor = not detected
+ag <- d[d$general_site == "Agincourt", ]
+cat("Agincourt carriers:", sum(ag$snp == 1), "(expect 48) | non-carriers:", sum(ag$snp == 0), "\n")
+
+f <- y ~ snp + demographic_age + anthropometric_bmi + antibiotics_collapsed + PC1 + PC2 + PC3
+
+# ---- 1. Is it a detection effect? ----
+cat("\n== 1. Detected vs carrier (Agincourt) ==\n")
+tab <- table(carrier = ag$snp, detected = ag$detected); print(tab)
+print(round(prop.table(tab, 1), 2))
+print(fisher.test(tab)$p.value)
+
+# ---- 2. Is the SNP a haplogroup marker? ----
+cat("\n== 2. SNP by haplogroup ==\n")
+cat("Agincourt:\n"); print(table(snp = ag$snp, haplogroup = ag$hap, useNA = "ifany"))
+cat("All sites:\n");  print(table(snp = d$snp,  haplogroup = d$hap,  useNA = "ifany"))
+
+# ---- 3. Per-site estimates ----
+  print(coef(summary(lm(f, det)))["snp", ], digits = 3) else cat("too few to fit\n") == 0), "\n")A, p = NA)
+
 # =========================================================
 # RUN 2: ALL SITES, SEPARATELY, THEN COMBINED (meta-analysis)
 
