@@ -188,7 +188,7 @@ res1  <- report_scan(tab1, minp1, paste("RUN 1:", first_site, "only"), "species_
 -----------------------------------------
 # Confirmation of a Anaerotruncus
  --------------------------------------
-snp <- "MT:8251_G_A"
+snp <- "MT:15466_G_A"
 tx  <- "Anaerotruncus sp. CAG:390 [ref_mOTU_v3_07591]"
 stopifnot(tx %in% colnames(Y), snp %in% colnames(geno))
 
